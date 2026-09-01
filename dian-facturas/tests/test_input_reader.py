@@ -49,6 +49,30 @@ def test_sin_columna_cufe_falla(tmp_path):
         read_jobs(f)
 
 
+def test_encabezado_cufe_cude_y_naming(tmp_path):
+    # Encabezado 'CUFE/CUDE' y nombre derivado de PREFIJO-FOLIO.
+    f = tmp_path / "f.csv"
+    f.write_text(
+        f"Tipo de documento;CUFE/CUDE;Folio;Prefijo;Nombre Emisor\n"
+        f"Factura electronica;{CUFE1};20809;FEIN;INNOVA SAS\n",
+        encoding="utf-8",
+    )
+    jobs = read_jobs(f)
+    j = jobs[0]
+    assert j.cufe == CUFE1
+    assert j.tipo == "Factura electronica"
+    assert j.safe_name() == "FEIN-20809"
+    assert j.folder() == "INNOVA SAS"
+
+
+def test_nit_emisor_no_es_password(tmp_path):
+    # 'NIT Emisor' NO debe usarse como contrasena (la clave es el NIT global).
+    f = tmp_path / "f.csv"
+    f.write_text(f"CUFE/CUDE;NIT Emisor\n{CUFE1};900346567\n", encoding="utf-8")
+    jobs = read_jobs(f)
+    assert jobs[0].nit is None
+
+
 def test_safe_name_sanitiza(tmp_path):
     f = tmp_path / "f.csv"
     f.write_text(f'cufe,nombre\n{CUFE1},"a/b:c*?"\n', encoding="utf-8")

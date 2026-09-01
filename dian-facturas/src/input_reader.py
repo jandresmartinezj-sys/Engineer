@@ -1,8 +1,13 @@
 """Lee la lista de CUFEs desde Excel (.xlsx) o CSV y la normaliza a Jobs.
 
-Detecta columnas sin importar mayusculas/acentos. Columna obligatoria: cufe.
-Opcionales: nit (contrasena por fila), nombre (nombre de archivo de salida),
-proveedor (subcarpeta para organizar).
+Detecta columnas sin importar mayusculas/acentos. Columna obligatoria: CUFE
+(acepta encabezados como 'CUFE', 'CUFE/CUDE', 'CUDE', 'documentkey'...).
+Columnas opcionales aprovechadas si existen: tipo de documento, prefijo, folio,
+nombre emisor (para nombrar y organizar la salida).
+
+Nota sobre la contrasena: la clave de los documentos es el NIT del USUARIO que
+consulta (global, DIAN_NIT), no el NIT del emisor de cada fila. Por eso NO se
+mapea 'NIT Emisor' como contrasena por fila.
 """
 from __future__ import annotations
 
@@ -16,32 +21,51 @@ from pathlib import Path
 @dataclass
 class Job:
     cufe: str
-    nit: str | None = None       # sobrescribe el NIT global si viene en la fila
-    nombre: str | None = None    # nombre de archivo deseado (sin extension)
+    nit: str | None = None       # sobrescribe el NIT global solo si la fila trae 'nit'
+    nombre: str | None = None
     proveedor: str | None = None
+    tipo: str | None = None
+    prefijo: str | None = None
+    folio: str | None = None
     row: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def safe_name(self) -> str:
-        """Nombre de archivo seguro: usa 'nombre' o los ultimos 12 chars del CUFE."""
-        base = self.nombre or f"factura_{self.cufe[-12:]}"
-        return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip() or self.cufe[-12:]
+        """Nombre de archivo: 'nombre', o 'PREFIJO-FOLIO', o cola del CUFE."""
+        if self.nombre:
+            base = self.nombre
+        elif self.prefijo and self.folio:
+            base = f"{self.prefijo}-{self.folio}"
+        elif self.folio:
+            base = self.folio
+        else:
+            base = f"factura_{self.cufe[-12:]}"
+        base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip()
+        return base or self.cufe[-12:]
+
+    def folder(self) -> str:
+        """Subcarpeta de salida: proveedor saneado, o vacio."""
+        if not self.proveedor:
+            return ""
+        return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", self.proveedor).strip()
 
 
 def _norm(text: str) -> str:
-    """minusculas, sin acentos, sin espacios extremos: para casar encabezados."""
-    text = unicodedata.normalize("NFKD", text)
+    text = unicodedata.normalize("NFKD", text or "")
     text = "".join(c for c in text if not unicodedata.combining(c))
     return text.strip().lower()
 
 
-# alias de encabezados -> campo canonico
-_HEADER_ALIASES = {
-    "cufe": "cufe", "cude": "cufe", "documentkey": "cufe", "clave": "cufe",
-    "codigo": "cufe", "codigo unico": "cufe",
-    "nit": "nit", "password": "nit", "contrasena": "nit", "clave documento": "nit",
+# Coincidencia exacta (tras normalizar) -> campo canonico.
+_HEADER_EXACT = {
+    "cufe": "cufe", "cude": "cufe", "cufe/cude": "cufe", "cufe cude": "cufe",
+    "documentkey": "cufe", "clave": "cufe", "codigo": "cufe", "codigo unico": "cufe",
+    "nit": "nit", "password": "nit", "contrasena": "nit",
     "nombre": "nombre", "archivo": "nombre", "nombre archivo": "nombre",
-    "proveedor": "proveedor", "emisor": "proveedor", "vendedor": "proveedor",
+    "proveedor": "proveedor", "nombre emisor": "proveedor", "emisor": "proveedor",
+    "tipo de documento": "tipo", "tipo": "tipo",
+    "prefijo": "prefijo",
+    "folio": "folio", "numero": "folio", "no": "folio",
 }
 
 _CUFE_RE = re.compile(r"^[0-9a-fA-F]{40,120}$")
@@ -50,14 +74,16 @@ _CUFE_RE = re.compile(r"^[0-9a-fA-F]{40,120}$")
 def _map_headers(headers: list[str]) -> dict[int, str]:
     mapping: dict[int, str] = {}
     for i, h in enumerate(headers):
-        key = _HEADER_ALIASES.get(_norm(h or ""))
-        if key:
-            mapping[i] = key
+        key = _norm(h)
+        field_name = _HEADER_EXACT.get(key)
+        if not field_name and ("cufe" in key or "cude" in key):
+            field_name = "cufe"  # tolera variantes: 'CUFE/CUDE', 'cufe_uuid'...
+        if field_name and field_name not in mapping.values():
+            mapping[i] = field_name
     return mapping
 
 
 def _rows_from_csv(path: Path) -> list[list[str]]:
-    # Detecta delimitador (coma o punto y coma, comun en Excel-ES).
     sample = path.read_text(encoding="utf-8-sig", errors="replace")[:4096]
     delim = ";" if sample.count(";") > sample.count(",") else ","
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
@@ -69,9 +95,7 @@ def _rows_from_xlsx(path: Path) -> list[list[str]]:
 
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
-    rows: list[list[str]] = []
-    for r in ws.iter_rows(values_only=True):
-        rows.append(["" if c is None else str(c) for c in r])
+    rows = [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
     wb.close()
     return rows
 
@@ -89,44 +113,44 @@ def read_jobs(path: str | Path) -> list[Job]:
     else:
         raise ValueError(f"Formato no soportado: {suffix}. Usa .xlsx o .csv")
 
-    rows = [r for r in rows if any((c or "").strip() for c in r)]  # descarta filas vacias
+    rows = [r for r in rows if any((c or "").strip() for c in r)]
     if not rows:
         raise ValueError(f"El archivo {path.name} no tiene datos.")
 
     header_map = _map_headers(rows[0])
     if "cufe" not in header_map.values():
         raise ValueError(
-            "No encontre una columna de CUFE. Encabezados aceptados: "
-            "cufe, cude, documentkey, clave, codigo. "
-            f"Encabezados detectados: {rows[0]}"
+            "No encontre una columna de CUFE. Encabezados aceptados: cufe, "
+            "cufe/cude, cude, documentkey, clave, codigo. "
+            f"Detectados: {rows[0]}"
         )
 
     jobs: list[Job] = []
     seen: set[str] = set()
     for idx, row in enumerate(rows[1:], start=2):
-        record: dict[str, str] = {}
-        for col, field_name in header_map.items():
+        rec: dict[str, str] = {}
+        for col, name in header_map.items():
             if col < len(row):
-                record[field_name] = (row[col] or "").strip()
+                rec[name] = (row[col] or "").strip()
 
-        cufe = record.get("cufe", "")
-        if not cufe:
+        cufe = rec.get("cufe", "")
+        if not cufe or cufe in seen:
             continue
-        if cufe in seen:
-            continue  # idempotencia a nivel de entrada: sin duplicados
         seen.add(cufe)
 
         job = Job(
             cufe=cufe,
-            nit=record.get("nit") or None,
-            nombre=record.get("nombre") or None,
-            proveedor=record.get("proveedor") or None,
+            nit=rec.get("nit") or None,
+            nombre=rec.get("nombre") or None,
+            proveedor=rec.get("proveedor") or None,
+            tipo=rec.get("tipo") or None,
+            prefijo=rec.get("prefijo") or None,
+            folio=rec.get("folio") or None,
             row=idx,
         )
         if not _CUFE_RE.match(cufe):
             job.warnings.append(
-                f"El CUFE de la fila {idx} no parece hexadecimal valido "
-                f"(len={len(cufe)}). Se intentara igual."
+                f"Fila {idx}: el CUFE no parece hex valido (len={len(cufe)}). Se intentara igual."
             )
         jobs.append(job)
 

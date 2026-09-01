@@ -25,9 +25,20 @@ from src.printer import print_file
 from src.tracker import Tracker
 
 
+def _apply_filters(jobs: list[Job], args) -> list[Job]:
+    if args.tipo:
+        needle = args.tipo.strip().lower()
+        jobs = [j for j in jobs if needle in (j.tipo or "").lower()]
+    if args.prefijo:
+        wanted = {p.strip().upper() for p in args.prefijo.split(",") if p.strip()}
+        jobs = [j for j in jobs if (j.prefijo or "").upper() in wanted]
+    return jobs
+
+
 def _select_jobs(jobs: list[Job], tracker: Tracker, args) -> list[Job]:
     if args.only:
         return [j for j in jobs if j.cufe == args.only] or [Job(cufe=args.only, row=0)]
+    jobs = _apply_filters(jobs, args)
     if args.retry_failed:
         return [j for j in jobs if tracker.get(j.cufe).get("status") == "failed"]
     return [j for j in jobs if not tracker.is_done(j.cufe)]
@@ -40,6 +51,8 @@ def main() -> int:
     parser.add_argument("--retry-failed", action="store_true", help="Reintentar los fallidos")
     parser.add_argument("--no-print", action="store_true", help="No imprimir")
     parser.add_argument("--limit", type=int, default=0, help="Maximo de documentos a procesar")
+    parser.add_argument("--tipo", help="Filtra por 'Tipo de documento' (subcadena, ej: 'Factura')")
+    parser.add_argument("--prefijo", help="Filtra por prefijo(s), separados por coma (ej: FEV,FARE)")
     parser.add_argument("--inspect", metavar="CUFE", help="Modo diagnostico: vuelca el DOM")
     args = parser.parse_args()
 
@@ -89,7 +102,7 @@ def main() -> int:
             try:
                 raw = client.fetch_document(job, password, cfg.download_dir / "_crudo")
 
-                subdir = cfg.download_dir / (job.proveedor or "")
+                subdir = cfg.download_dir / job.folder()
                 out_pdf = subdir / f"{job.safe_name()}.pdf"
                 process_download(raw, password, out_pdf)
                 log.info("PDF listo: %s", out_pdf)
