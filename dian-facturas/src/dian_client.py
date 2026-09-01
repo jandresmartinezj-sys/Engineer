@@ -1,16 +1,23 @@
-"""Navegacion asistida al portal publico de DIAN (consulta por CUFE).
+"""Navegacion al portal DIAN (certificate-vpfe / catalogo-vpfe) por CUFE.
 
-IMPORTANTE (limitacion honesta): el DOM exacto del portal DIAN no pudo verificarse
-al construir esta herramienta. Por eso el flujo es RESILIENTE:
-  1. Intenta autollenar el NIT y hacer clic en Descargar con selectores candidatos.
-  2. Si no encuentra algo, CEDE EL CONTROL al humano (que ya debe resolver el
-     captcha de todos modos) y captura la descarga la dispare quien la dispare.
-Los selectores candidatos estan marcados con TODO-CONFIRMAR: ajustar tras la
-primera corrida real usando `python run.py --inspect <CUFE>`.
+Secuencia real (confirmada por capturas del usuario):
+  1. Abrir SearchDocument?DocumentKey=<CUFE>  -> el CUFE queda prellenado.
+  2. Llenar el campo "NIT del Emisor o Receptor del documento".
+  3. Cloudflare Turnstile: normalmente pasa solo ("Operacion exitosa"). Si
+     realmente desafia, se cede el control al humano (pausa adaptativa).
+  4. Clic en "Buscar" -> carga el documento.
+  5. Modal "Este archivo contiene contrasena..." -> clic "Aceptar".
+  6. Clic en "Descargar PDF" -> Playwright captura la descarga (sin dialogo nativo).
+El PDF descargado esta cifrado con el NIT; lo descifra src/pdf_unlock.py.
+
+Diseno resiliente: cada paso intenta selectores concretos y, si falla, cede el
+control al humano sin abortar. Afinar con `python run.py --inspect <CUFE>`.
 """
 from __future__ import annotations
 
 import logging
+import re
+import time
 from pathlib import Path
 
 from playwright.sync_api import (
@@ -25,28 +32,34 @@ from .input_reader import Job
 
 log = logging.getLogger("dian.client")
 
-# TODO-CONFIRMAR: selectores candidatos. Ajustar con --inspect en la primera corrida.
+# Selectores basados en las capturas reales. Ajustar con --inspect si cambian.
+CUFE_SELECTORS = [
+    "input[placeholder*='CUFE' i]",
+    "input[name*='cufe' i]",
+    "input[name*='documentkey' i]",
+]
 NIT_SELECTORS = [
-    "input[type=password]",
     "input[placeholder*='NIT' i]",
     "input[name*='nit' i]",
     "input[id*='nit' i]",
-    "input[name*='password' i]",
 ]
-DOWNLOAD_SELECTORS = [
+BUSCAR_SELECTORS = [
+    "button:has-text('Buscar'):not(:has-text('Documento'))",
+    "input[type=submit][value*='Buscar' i]",
+    "button:text-is('Buscar')",
+]
+ACEPTAR_SELECTORS = [
+    "button:has-text('Aceptar')",
+    ".modal button:has-text('Aceptar')",
+    "button:text-is('Aceptar')",
+]
+DESCARGAR_SELECTORS = [
     "a:has-text('Descargar PDF')",
     "button:has-text('Descargar PDF')",
     "a:has-text('Descargar')",
-    "button:has-text('Descargar')",
-    "a:has-text('PDF')",
     "[title*='Descargar' i]",
-    "[aria-label*='Descargar' i]",
 ]
-CAPTCHA_SELECTORS = [
-    "iframe[src*='recaptcha']",
-    ".g-recaptcha",
-    "iframe[title*='captcha' i]",
-]
+TURNSTILE_PRESENT = "iframe[src*='challenges.cloudflare.com'], .cf-turnstile"
 
 
 class DianClient:
@@ -60,7 +73,7 @@ class DianClient:
         self._pw = sync_playwright().start()
         self._ctx = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.cfg.user_data_dir),
-            headless=self.cfg.headless,          # False: el captcha necesita ver el navegador
+            headless=self.cfg.headless,  # False: navegador visible (mejor tasa Turnstile)
             accept_downloads=True,
         )
         self._ctx.set_default_timeout(self.cfg.nav_timeout_ms)
@@ -79,86 +92,118 @@ class DianClient:
         assert self._ctx is not None
         return self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
 
-    # ---------- helpers de UI (best-effort) ----------
+    # ---------- helpers ----------
 
-    def _try_fill_nit(self, page, password: str) -> bool:
-        for sel in NIT_SELECTORS:
+    def _first_visible(self, page, selectors: list[str], timeout: int = 1500):
+        for sel in selectors:
             try:
                 loc = page.locator(sel).first
-                if loc.is_visible(timeout=1500):
-                    loc.fill(password, timeout=2000)
-                    log.info("NIT autollenado (selector: %s)", sel)
-                    return True
+                if loc.is_visible(timeout=timeout):
+                    return loc, sel
             except Exception:
                 continue
-        log.info("No se pudo autollenar el NIT; lo hara el humano si el sitio lo pide.")
-        return False
+        return None, None
 
-    def _captcha_present(self, page) -> bool:
-        for sel in CAPTCHA_SELECTORS:
+    def _fill_nit(self, page, job: Job, password: str) -> None:
+        # El CUFE suele venir prellenado por la URL; lo aseguramos si esta vacio.
+        cufe_loc, _ = self._first_visible(page, CUFE_SELECTORS)
+        if cufe_loc is None:
+            cufe_loc = page.locator("input[type=text], input:not([type])").first
+        try:
+            if cufe_loc and not (cufe_loc.input_value() or "").strip():
+                cufe_loc.fill(job.cufe)
+        except Exception:
+            pass
+
+        nit_loc, sel = self._first_visible(page, NIT_SELECTORS)
+        if nit_loc is None:
+            # Fallback por etiqueta o segundo campo de texto de la pagina.
             try:
-                if page.locator(sel).first.is_visible(timeout=800):
-                    return True
+                nit_loc = page.get_by_label(re.compile("NIT del Emisor", re.I)).first
+                if not nit_loc.is_visible(timeout=1000):
+                    nit_loc = None
             except Exception:
-                continue
-        return False
+                nit_loc = None
+        if nit_loc is None:
+            inputs = page.locator("input[type=text], input:not([type])")
+            if inputs.count() >= 2:
+                nit_loc = inputs.nth(1)
+        if nit_loc is not None:
+            try:
+                nit_loc.fill(password)
+                log.info("NIT autollenado (%s)", sel or "fallback")
+                return
+            except Exception:
+                pass
+        log.warning("No pude autollenar el NIT; el humano debera escribirlo.")
 
-    def _human_gate(self, page, job: Job) -> None:
-        """Cede el control al humano para captcha / pasos que no pudimos automatizar."""
-        captcha = self._captcha_present(page)
-        tag = job.cufe[-12:]
-        print("\n" + "=" * 68)
-        print(f"  DOCUMENTO CUFE ...{tag}")
-        if captcha:
-            print("  * Se detecto un CAPTCHA. Resuelvelo en la ventana del navegador.")
-        print("  * Verifica que el documento este visible y listo para descargar.")
-        print("  * Si el NIT no quedo puesto, escribelo tu en la pagina.")
-        print("=" * 68)
+    def _wait_turnstile(self, page) -> None:
+        """Espera a que Cloudflare Turnstile pase solo; pausa humana si desafia."""
+        if page.locator(TURNSTILE_PRESENT).count() == 0:
+            return  # no hay widget
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                token = page.evaluate(
+                    "() => { const e = document.querySelector("
+                    "'input[name=\"cf-turnstile-response\"]'); return e ? e.value : ''; }"
+                )
+            except Exception:
+                token = ""
+            if token:
+                log.info("Turnstile resuelto automaticamente.")
+                return
+            page.wait_for_timeout(1000)
+        log.info("Turnstile no paso solo en 20s.")
         if self.interactive:
-            input("  Cuando este listo, presiona ENTER aqui para continuar... ")
+            print("  * Cloudflare pide verificacion. Resuelvela en el navegador y")
+            input("    presiona ENTER aqui para continuar... ")
 
-    def _try_click_download(self, page) -> bool:
-        for sel in DOWNLOAD_SELECTORS:
-            try:
-                loc = page.locator(sel).first
-                if loc.is_visible(timeout=1200):
-                    loc.click(timeout=3000)
-                    log.info("Clic en descarga (selector: %s)", sel)
-                    return True
-            except Exception:
-                continue
-        return False
+    def _click_any(self, page, selectors: list[str], label: str, timeout: int = 4000) -> bool:
+        loc, sel = self._first_visible(page, selectors, timeout=timeout)
+        if loc is None:
+            return False
+        try:
+            loc.click(timeout=timeout)
+            log.info("Clic en %s (%s)", label, sel)
+            return True
+        except Exception as exc:
+            log.warning("No pude clicar %s: %s", label, exc)
+            return False
 
     # ---------- API principal ----------
 
     def fetch_document(self, job: Job, password: str, raw_dir: Path) -> Path:
-        """Navega, deja que el humano resuelva el captcha y captura la descarga.
-
-        Devuelve la ruta del archivo crudo descargado (PDF o ZIP, aun con contrasena).
-        """
         raw_dir.mkdir(parents=True, exist_ok=True)
         page = self.page
-        url = self.cfg.search_url + job.cufe
         log.info("Abriendo CUFE ...%s", job.cufe[-12:])
-        page.goto(url, wait_until="domcontentloaded", timeout=self.cfg.nav_timeout_ms)
+        page.goto(self.cfg.search_url + job.cufe,
+                  wait_until="domcontentloaded", timeout=self.cfg.nav_timeout_ms)
 
-        self._try_fill_nit(page, password)
-        self._human_gate(page, job)
+        self._fill_nit(page, job, password)
+        self._wait_turnstile(page)
 
-        # expect_download espera el evento aunque el clic lo haga el humano.
+        if not self._click_any(page, BUSCAR_SELECTORS, "Buscar"):
+            print("  No encontre 'Buscar'. Haz clic tu en Buscar.")
+            if self.interactive:
+                input("    Presiona ENTER cuando cargue el documento... ")
+
+        # Modal "Este archivo contiene contrasena..." (best-effort, puede no aparecer).
+        self._click_any(page, ACEPTAR_SELECTORS, "Aceptar", timeout=6000)
+
+        # Descarga (Playwright intercepta; no aparece el dialogo nativo del SO).
         try:
             with page.expect_download(timeout=self.cfg.captcha_timeout * 1000) as dl_info:
-                if not self._try_click_download(page):
-                    print("  No encontre el boton de descarga automaticamente.")
-                    print("  --> Haz clic tu en 'Descargar'. Espero el archivo...")
+                if not self._click_any(page, DESCARGAR_SELECTORS, "Descargar PDF"):
+                    print("  No encontre 'Descargar PDF'. Haz clic tu; espero el archivo...")
                 download: Download = dl_info.value
         except PWTimeout as exc:
             raise RuntimeError(
-                "No se detecto ninguna descarga a tiempo. "
-                "Revisa si el documento existe o si falto resolver el captcha."
+                "No se detecto la descarga. Verifica que el documento exista y "
+                "que se haya pasado la verificacion de Cloudflare."
             ) from exc
 
-        suggested = download.suggested_filename or f"{job.safe_name()}.bin"
+        suggested = download.suggested_filename or f"{job.safe_name()}.pdf"
         raw_path = raw_dir / f"{job.safe_name()}__{suggested}"
         download.save_as(str(raw_path))
         log.info("Descargado: %s", raw_path.name)
@@ -169,8 +214,7 @@ class DianClient:
         out_dir.mkdir(parents=True, exist_ok=True)
         page = self.page
         page.goto(self.cfg.search_url + cufe, wait_until="domcontentloaded")
-        input("Resuelve el captcha si aparece y presiona ENTER para capturar el DOM... ")
+        input("Ajusta lo necesario en el navegador y presiona ENTER para capturar... ")
         (out_dir / "pagina.html").write_text(page.content(), encoding="utf-8")
         page.screenshot(path=str(out_dir / "pagina.png"), full_page=True)
         print(f"Guardado: {out_dir/'pagina.html'} y {out_dir/'pagina.png'}")
-        print("Enviame esos dos archivos para fijar los selectores reales.")

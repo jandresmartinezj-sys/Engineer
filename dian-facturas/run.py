@@ -20,7 +20,7 @@ from src.config import Config
 from src.dian_client import DianClient
 from src.input_reader import Job, read_jobs
 from src.logging_setup import setup_logging
-from src.pdf_unlock import UnlockError, process_download
+from src.pdf_unlock import process_download
 from src.printer import print_file
 from src.tracker import Tracker
 
@@ -100,7 +100,7 @@ def main() -> int:
 
                 tracker.mark_done(job.cufe, str(out_pdf), run_id)
                 ok += 1
-            except (UnlockError, RuntimeError, Exception) as exc:  # aislar por documento
+            except Exception as exc:  # aislar el fallo por documento, no tumbar el lote
                 fail += 1
                 log.error("FALLO CUFE ...%s: %s", tag, exc)
                 tracker.mark_failed(job.cufe, str(exc), run_id)

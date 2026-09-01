@@ -3,31 +3,39 @@
 Automatiza la descarga de facturas electronicas desde el portal de la DIAN
 (`certificate-vpfe.dian.gov.co`) a partir de una lista de CUFEs en Excel/CSV.
 
-## Que hace (y que NO)
+## Que hace
 
-La pagina de la DIAN muestra **un captcha en cada documento**. Por eso **no existe
-descarga 100% desatendida honesta**: el captcha lo resuelve una persona. Esta
-herramienta automatiza *todo lo demas*, reduciendo el trabajo por factura de ~7
-pasos manuales a **1** (resolver el captcha):
+Secuencia real del portal (confirmada con capturas): abrir
+`SearchDocument?DocumentKey=<CUFE>` (el CUFE queda prellenado) -> escribir el NIT
+-> pasar la verificacion **Cloudflare Turnstile** -> **Buscar** -> modal
+*"Este archivo contiene contrasena..."* -> **Aceptar** -> **Descargar PDF**. El PDF
+que baja esta cifrado con el NIT; al abrirlo pide contrasena. La herramienta hace
+toda esa cadena y ademas **quita la contrasena** para dejar el PDF listo para imprimir.
 
 | Paso | Antes (manual) | Con la herramienta |
 |------|----------------|--------------------|
 | Tomar el CUFE | copiar/pegar uno por uno | lee la lista Excel/CSV |
-| Entrar al documento | escribir URL / escanear QR | navega solo |
-| Poner el NIT | a mano | autollenado (best-effort) |
-| Resolver captcha | a mano | **a mano (unico paso humano)** |
-| Descargar | clic | clic automatico (o asistido) |
-| Quitar contrasena (NIT) al PDF/ZIP | a mano, dos veces | automatico |
+| Entrar al documento | escribir URL | navega solo |
+| Poner el NIT | a mano | autollenado |
+| Verificacion Cloudflare | a veces un clic | pasa sola; pausa solo si desafia |
+| Buscar / Aceptar / Descargar PDF | 3 clics | automatico |
+| Quitar la contrasena (NIT) al PDF | a mano | automatico |
 | Renombrar / organizar / imprimir | a mano | automatico |
 | Saber que ya se hizo | memoria | estado idempotente |
 
-**Estado de verificacion:** la logica de lectura, descifrado (PDF y ZIP con NIT) e
-idempotencia esta cubierta por tests (`pytest`, 15/15). La navegacion concreta en
-DIAN (selectores del boton de descarga y del campo NIT) **debe confirmarse en tu
-primera corrida** con `--inspect`, porque el DOM del portal no se pudo inspeccionar
-al construir la herramienta. Mientras tanto funciona en **modo asistido**: si el
-script no encuentra un boton, cede el control y tu haces ese clic; el archivo se
-captura, descifra, organiza e imprime igual.
+**Sobre el "captcha":** es **Cloudflare Turnstile**, no reCAPTCHA. En navegador
+visible suele pasar solo (invisible). Por eso el objetivo real es **desatendido**:
+solo pausa para pedir tu intervencion si Turnstile presenta un desafio explicito.
+No se puede garantizar 100%: Cloudflare puede endurecer la verificacion ante
+automatizacion; el perfil persistente y el modo visible maximizan la tasa de exito.
+
+**Estado de verificacion:** la lectura de la lista, el **descifrado del PDF cifrado
+con el NIT** y la idempotencia estan cubiertos por tests (`pytest`, 15/15). La
+navegacion usa selectores basados en las capturas reales, pero **no se ejecuto
+contra DIAN** al construir (la red del entorno bloquea `*.dian.gov.co`): confirma
+los selectores en tu primera corrida con `--inspect`. Si algun boton cambia de
+nombre, la herramienta cede el control y tu haces ese clic; la descarga, el
+descifrado y la impresion siguen funcionando igual.
 
 ## Requisitos
 
@@ -69,10 +77,11 @@ python run.py --no-print          # descarga sin imprimir
 python run.py --inspect <CUFE>    # diagnostico: vuelca el DOM real
 ```
 
-Flujo por documento: se abre el navegador, se autollena el NIT, **resuelves el
-captcha** y presionas ENTER en la consola; la herramienta descarga, quita la
-contrasena, guarda el PDF en `descargas/<proveedor>/<nombre>.pdf`, opcionalmente
-imprime, y marca el CUFE como hecho. Si vuelves a ejecutar, los ya hechos se saltan.
+Flujo por documento: se abre el navegador, se autollena el NIT, se espera a que
+Cloudflare pase (si desafia, te pide un ENTER en consola), se hace Buscar ->
+Aceptar -> Descargar PDF, se quita la contrasena y se guarda el PDF en
+`descargas/<proveedor>/<nombre>.pdf`, opcionalmente se imprime y se marca el CUFE
+como hecho. Si vuelves a ejecutar, los ya hechos se saltan.
 
 ## Afinar los selectores (primera corrida)
 
