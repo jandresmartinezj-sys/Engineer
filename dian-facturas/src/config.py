@@ -34,7 +34,16 @@ class Config:
     captcha_timeout: int = 300       # segundos que esperamos al humano por doc
     nav_timeout_ms: int = 45000
     search_url: str = DIAN_SEARCH_URL
+    client_cert_path: str | None = None   # .pfx/.p12 del certificado DIAN (mTLS)
+    client_cert_pass: str | None = None
     errors: list[str] = field(default_factory=list)
+
+    @property
+    def cert_origin(self) -> str:
+        """Origen (scheme://host) del portal, para asociar el certificado cliente."""
+        from urllib.parse import urlparse
+        p = urlparse(self.search_url)
+        return f"{p.scheme}://{p.netloc}"
 
     @classmethod
     def load(cls, env_path: str | os.PathLike | None = None) -> "Config":
@@ -61,6 +70,9 @@ class Config:
             pacing_seconds=float(os.getenv("PACING_SECONDS", "3")),
             captcha_timeout=int(os.getenv("CAPTCHA_TIMEOUT", "300")),
             nav_timeout_ms=int(os.getenv("NAV_TIMEOUT_MS", "45000")),
+            search_url=(os.getenv("DIAN_SEARCH_URL") or "").strip() or DIAN_SEARCH_URL,
+            client_cert_path=(os.getenv("CLIENT_CERT_PATH") or "").strip() or None,
+            client_cert_pass=(os.getenv("CLIENT_CERT_PASS") or "").strip() or None,
         )
         cfg._validate()
         return cfg

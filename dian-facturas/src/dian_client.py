@@ -71,11 +71,20 @@ class DianClient:
 
     def __enter__(self) -> "DianClient":
         self._pw = sync_playwright().start()
-        self._ctx = self._pw.chromium.launch_persistent_context(
+        kwargs = dict(
             user_data_dir=str(self.cfg.user_data_dir),
             headless=self.cfg.headless,  # False: navegador visible (mejor tasa Turnstile)
             accept_downloads=True,
         )
+        # Certificado de cliente (mTLS) si el portal lo exige (certificate-vpfe).
+        if self.cfg.client_cert_path:
+            kwargs["client_certificates"] = [{
+                "origin": self.cfg.cert_origin,
+                "pfxPath": self.cfg.client_cert_path,
+                "passphrase": self.cfg.client_cert_pass or "",
+            }]
+            log.info("Certificado de cliente configurado para %s", self.cfg.cert_origin)
+        self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
         self._ctx.set_default_timeout(self.cfg.nav_timeout_ms)
         return self
 
