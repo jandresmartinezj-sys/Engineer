@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DIAN - Descarga masiva de facturas por CUFE
 // @namespace    dian-facturas
-// @version      0.1.2
+// @version      0.1.3
 // @description  Recorre una lista de CUFEs en el portal publico DIAN (catalogo-vpfe), llena el NIT, espera la verificacion Cloudflare, y hace Buscar -> Aceptar -> Descargar PDF. Corre dentro de TU navegador real, asi Turnstile lo trata como humano.
 // @match        https://catalogo-vpfe.dian.gov.co/*
 // @run-at       document-idle
@@ -29,6 +29,7 @@
 
   const BASE = 'https://catalogo-vpfe.dian.gov.co/User/SearchDocument?DocumentKey=';
   const short = (c) => (c || '').slice(-10);
+  const PAGE_TS = Date.now();   // momento de carga de ESTA pagina
 
   // ---------------- Utilidades DOM ----------------
   // Escribe en un input de forma que Angular/React detecten el cambio.
@@ -129,7 +130,18 @@
       if (ni && !(ni.value || '').trim()) setNativeValue(ni, state.nit);
 
       const tok = turnstileToken();
-      if (!tok) { setStatusMsg('Esperando verificacion Cloudflare... (' + short(cufe) + ')'); return; }
+      if (!tok) {
+        const waited = Date.now() - PAGE_TS;
+        setStatusMsg('Esperando verificacion Cloudflare... ' + Math.round(waited / 1000) + 's (' + short(cufe) + ')');
+        // Si el token no llega en 22s, recargar (Cloudflare se reinicia limpio),
+        // hasta 2 veces; luego marcar error y seguir sin trabar el lote.
+        if (waited > 22000) {
+          const r = sd.reloads || 0;
+          if (r < 2) { sd.reloads = r + 1; setSess(sd); console.log('[DIAN] token lento, recargando'); location.reload(); }
+          else { pushError(cufe, 'sin token captcha'); advance(); }
+        }
+        return;
+      }
 
       // Token listo: clic en Buscar (con backoff para no repetir).
       if (Date.now() - (sd.lastBuscar || 0) > 8000) {
