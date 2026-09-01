@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DIAN - Descarga masiva de facturas por CUFE
 // @namespace    dian-facturas
-// @version      0.1.0
+// @version      0.1.1
 // @description  Recorre una lista de CUFEs en el portal publico DIAN (catalogo-vpfe), llena el NIT, espera la verificacion Cloudflare, y hace Buscar -> Aceptar -> Descargar PDF. Corre dentro de TU navegador real, asi Turnstile lo trata como humano.
 // @match        https://catalogo-vpfe.dian.gov.co/*
 // @run-at       document-idle
@@ -103,10 +103,13 @@
     }
 
     if (isSearch()) {
+      // Rellenar SOLO si el campo esta vacio, para no duplicar el valor:
+      // el formulario Angular de DIAN antepone en cada 'input', y el CUFE ya
+      // viene prellenado por la URL (DocumentKey).
       const ci = findCufeInput();
-      if (ci && (ci.value || '').trim() !== cufe) setNativeValue(ci, cufe);
+      if (ci && !(ci.value || '').trim()) setNativeValue(ci, cufe);
       const ni = findNitInput();
-      if (ni && (ni.value || '').trim() !== state.nit) setNativeValue(ni, state.nit);
+      if (ni && !(ni.value || '').trim()) setNativeValue(ni, state.nit);
 
       const tok = turnstileToken();
       if (!tok) { setStatusMsg('Esperando verificacion Cloudflare... (' + short(cufe) + ')'); return; }
