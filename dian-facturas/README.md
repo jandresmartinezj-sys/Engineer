@@ -3,7 +3,20 @@
 Automatiza la descarga de facturas electronicas desde el portal de la DIAN
 (`certificate-vpfe.dian.gov.co`) a partir de una lista de CUFEs en Excel/CSV.
 
-## Que hace
+## Importante: dos vias segun Cloudflare
+
+El portal DIAN protege la busqueda con **Cloudflare Turnstile**, que **bloquea la
+automatizacion externa** (Playwright/Selenium): al driver lo redirige al endpoint
+que exige certificado o le niega el token ("La verificacion fallo"). Por eso:
+
+- **Via recomendada (userscript):** corre dentro de TU navegador real, donde
+  Turnstile pasa como humano. Ver [`userscript/README.md`](userscript/README.md).
+  La descarga la hace el userscript; el descifrado en lote lo hace
+  `procesar_descargas.py`.
+- **Via Playwright (`run.py`):** queda como referencia y funciona en portales sin
+  Turnstile, pero contra DIAN hoy la bloquea Cloudflare.
+
+## Que hace (via Playwright, de referencia)
 
 Secuencia real del portal (confirmada con capturas): abrir
 `SearchDocument?DocumentKey=<CUFE>` (el CUFE queda prellenado) -> escribir el NIT
