@@ -177,27 +177,44 @@ class DianClient:
                 pass
         log.warning("No pude autollenar el NIT; el humano debera escribirlo.")
 
+    # JS que devuelve el token de captcha si ya fue emitido (Turnstile/reCAPTCHA/hCaptcha).
+    _TOKEN_JS = """() => {
+        const names = ['cf-turnstile-response','g-recaptcha-response','h-captcha-response'];
+        for (const n of names) {
+            const e = document.querySelector('[name="' + n + '"]');
+            if (e && e.value && e.value.length > 20) return e.value;
+        }
+        return '';
+    }"""
+
     def _wait_turnstile(self, page) -> None:
-        """Espera a que Cloudflare Turnstile pase solo; pausa humana si desafia."""
-        if page.locator(TURNSTILE_PRESENT).count() == 0:
-            return  # no hay widget
-        deadline = time.time() + 20
-        while time.time() < deadline:
+        """Espera a que el token del captcha exista ANTES de enviar 'Buscar'.
+
+        Cloudflare Turnstile suele emitir el token solo en unos segundos (en un
+        navegador real). Si no aparece, se pide al humano completar la verificacion.
+        Sin token, DIAN rechaza con 'Falta Token de validacion de captcha'.
+        """
+        start = time.time()
+        limit = max(20, min(self.cfg.captcha_timeout, 90))
+        prompted = False
+        while time.time() - start < limit:
             try:
-                token = page.evaluate(
-                    "() => { const e = document.querySelector("
-                    "'input[name=\"cf-turnstile-response\"]'); return e ? e.value : ''; }"
-                )
+                token = page.evaluate(self._TOKEN_JS)
             except Exception:
                 token = ""
             if token:
-                log.info("Turnstile resuelto automaticamente.")
+                log.info("Token de captcha presente (%.0fs).", time.time() - start)
                 return
+            if not prompted and self.interactive and time.time() - start > 12:
+                print("  * La verificacion de Cloudflare no se resolvio sola.")
+                print("    Si ves un recuadro de verificacion en la ventana, completalo.")
+                print("    (Espero el token automaticamente en cuanto lo resuelvas.)")
+                prompted = True
             page.wait_for_timeout(1000)
-        log.info("Turnstile no paso solo en 20s.")
+        log.warning("No aparecio token de captcha tras %ds.", limit)
         if self.interactive:
-            print("  * Cloudflare pide verificacion. Resuelvela en el navegador y")
-            input("    presiona ENTER aqui para continuar... ")
+            input("    Si ya completaste la verificacion, presiona ENTER para "
+                  "intentar Buscar... ")
 
     def _click_any(self, page, selectors: list[str], label: str, timeout: int = 4000) -> bool:
         loc, sel = self._first_visible(page, selectors, timeout=timeout)
