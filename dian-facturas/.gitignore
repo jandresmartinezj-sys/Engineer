@@ -1,0 +1,21 @@
+# Secretos y datos locales
+.env
+descargas/
+_crudo/
+.browser-profile/
+inspect/
+
+# Entrada real del usuario (deja solo el ejemplo versionado)
+facturas.csv
+facturas.xlsx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# SO
+Thumbs.db
+.DS_Store
