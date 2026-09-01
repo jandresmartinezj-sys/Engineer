@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DIAN - Descarga masiva de facturas por CUFE
 // @namespace    dian-facturas
-// @version      0.1.1
+// @version      0.1.2
 // @description  Recorre una lista de CUFEs en el portal publico DIAN (catalogo-vpfe), llena el NIT, espera la verificacion Cloudflare, y hace Buscar -> Aceptar -> Descargar PDF. Corre dentro de TU navegador real, asi Turnstile lo trata como humano.
 // @match        https://catalogo-vpfe.dian.gov.co/*
 // @run-at       document-idle
@@ -54,7 +54,21 @@
   const findBuscar   = () => [...document.querySelectorAll('button, input[type=submit]')]
                               .find(b => /^buscar$/i.test((b.textContent || b.value || '').trim()));
   const findAceptar  = () => byText('button', /^aceptar$/i);
-  const findDescargar = () => byText('a, button', /descargar\s*pdf/i) || byText('a, button', /descargar/i);
+  // Busca el elemento visible mas especifico cuyo texto sea "Descargar PDF".
+  function findDescargar() {
+    const cands = [...document.querySelectorAll('a, button, span, div, p, li, i')]
+      .filter(e => e.offsetParent !== null && /descargar\s*pdf/i.test(e.textContent || ''));
+    if (!cands.length) return null;
+    cands.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+    return cands[0];
+  }
+  // Clic robusto: dispara sobre el elemento y su ancestro <a>/<button>.
+  function clickReal(el) {
+    const target = el.closest('a, button') || el;
+    try { target.click(); } catch (e) {}
+    ['mousedown', 'mouseup', 'click'].forEach(t =>
+      target.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+  }
   function turnstileToken() {
     const e = document.querySelector('[name="cf-turnstile-response"]');
     return e && e.value && e.value.length > 20 ? e.value : '';
@@ -88,15 +102,18 @@
 
     if (isDocView()) {
       const aceptar = findAceptar();
-      if (aceptar) { aceptar.click(); return; }         // cierra el modal, siguiente tick descarga
+      if (aceptar) { console.log('[DIAN] clic Aceptar'); clickReal(aceptar); return; }
       if (!sd.downloaded) {
         const d = findDescargar();
         if (d) {
-          d.click();
+          console.log('[DIAN] clic Descargar PDF ->', d.tagName, JSON.stringify((d.textContent || '').trim()));
+          clickReal(d);
           sd.downloaded = true; setSess(sd);
           markDone(cufe);
           setStatusMsg('Descargado ' + short(cufe) + '. Siguiente en ' + state.delayMs + ' ms...');
           setTimeout(advance, state.delayMs);
+        } else {
+          setStatusMsg('No encuentro "Descargar PDF" en ' + short(cufe) + '...');
         }
       }
       return;
@@ -154,7 +171,11 @@
       'background:#0d2b45;color:#fff;font:12px/1.4 system-ui,Arial;padding:12px;border-radius:10px;' +
       'box-shadow:0 6px 24px rgba(0,0,0,.35);';
     p.innerHTML =
-      '<div style="font-weight:700;font-size:13px;margin-bottom:8px">DIAN · Descarga masiva</div>' +
+      '<div id="dp-head" style="font-weight:700;font-size:13px;margin-bottom:8px;cursor:move;display:flex;justify-content:space-between;align-items:center">' +
+        '<span>DIAN · Descarga masiva</span>' +
+        '<span id="dp-collapse" style="cursor:pointer;padding:0 6px;user-select:none">▾</span>' +
+      '</div>' +
+      '<div id="dp-body">' +
       'NIT (contrasena):<br><input id="dp-nit" style="width:100%;margin:2px 0 8px;box-sizing:border-box">' +
       'CUFEs (uno por linea):<br><textarea id="dp-cufes" rows="4" style="width:100%;margin:2px 0 8px;box-sizing:border-box"></textarea>' +
       'Pausa entre facturas (ms):<br><input id="dp-delay" style="width:100%;margin:2px 0 8px;box-sizing:border-box">' +
@@ -164,8 +185,42 @@
         '<button id="dp-reset" style="flex:1;padding:6px;background:#e74c3c;border:0;border-radius:6px;color:#fff;cursor:pointer">Reiniciar</button>' +
       '</div>' +
       '<div id="dp-status" style="font-weight:700"></div>' +
-      '<div id="dp-msg" style="opacity:.85;margin-top:4px;min-height:16px"></div>';
+      '<div id="dp-msg" style="opacity:.85;margin-top:4px;min-height:16px"></div>' +
+      '</div>';
     document.body.appendChild(p);
+
+    // Posicion guardada + arrastre por el encabezado.
+    try {
+      const pos = JSON.parse(localStorage.getItem('dian_panel_pos') || 'null');
+      if (pos) { p.style.left = pos.left; p.style.top = pos.top; p.style.right = 'auto'; }
+    } catch (e) {}
+    (function makeDraggable() {
+      const head = p.querySelector('#dp-head');
+      let sx, sy, ox, oy, drag = false;
+      head.addEventListener('mousedown', (e) => {
+        if (e.target.id === 'dp-collapse') return;
+        drag = true; sx = e.clientX; sy = e.clientY;
+        const r = p.getBoundingClientRect(); ox = r.left; oy = r.top;
+        e.preventDefault();
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        p.style.left = (ox + e.clientX - sx) + 'px';
+        p.style.top = (oy + e.clientY - sy) + 'px';
+        p.style.right = 'auto';
+      });
+      document.addEventListener('mouseup', () => {
+        if (!drag) return; drag = false;
+        localStorage.setItem('dian_panel_pos', JSON.stringify({ left: p.style.left, top: p.style.top }));
+      });
+    })();
+    // Plegar / desplegar.
+    p.querySelector('#dp-collapse').addEventListener('click', () => {
+      const body = p.querySelector('#dp-body'), btn = p.querySelector('#dp-collapse');
+      const hidden = body.style.display === 'none';
+      body.style.display = hidden ? '' : 'none';
+      btn.textContent = hidden ? '▾' : '▸';
+    });
 
     const $ = (id) => p.querySelector(id);
     $('#dp-nit').value = state.nit;
