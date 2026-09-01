@@ -10,9 +10,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Pagina real de descarga de documentos (confirmada por el usuario).
+# Portal publico de consulta (sin certificado de cliente), confirmado por el usuario.
+# El subdominio certificate-vpfe exige certificado mTLS; catalogo-vpfe es el publico.
 # El parametro DocumentKey es el CUFE (o CUDE en documentos equivalentes).
-DIAN_SEARCH_URL = "https://certificate-vpfe.dian.gov.co/User/SearchDocument?DocumentKey="
+DIAN_SEARCH_URL = "https://catalogo-vpfe.dian.gov.co/User/SearchDocument?DocumentKey="
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
