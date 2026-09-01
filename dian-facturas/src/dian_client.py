@@ -71,22 +71,53 @@ class DianClient:
 
     def __enter__(self) -> "DianClient":
         self._pw = sync_playwright().start()
-        kwargs = dict(
+        # Flags para reducir la huella de automatizacion (evita que DIAN/Cloudflare
+        # redirija al endpoint que exige certificado).
+        base = dict(
             user_data_dir=str(self.cfg.user_data_dir),
-            headless=self.cfg.headless,  # False: navegador visible (mejor tasa Turnstile)
+            headless=self.cfg.headless,
             accept_downloads=True,
+            args=["--disable-blink-features=AutomationControlled"],
+            ignore_default_args=["--enable-automation"],
+            locale="es-CO",
+            timezone_id="America/Bogota",
         )
-        # Certificado de cliente (mTLS) si el portal lo exige (certificate-vpfe).
-        if self.cfg.client_cert_path:
-            kwargs["client_certificates"] = [{
+        if self.cfg.client_cert_path:  # mTLS solo si se configura explicitamente
+            base["client_certificates"] = [{
                 "origin": self.cfg.cert_origin,
                 "pfxPath": self.cfg.client_cert_path,
                 "passphrase": self.cfg.client_cert_pass or "",
             }]
             log.info("Certificado de cliente configurado para %s", self.cfg.cert_origin)
-        self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+
+        self._ctx = self._launch_context(base)
+        self._ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
         self._ctx.set_default_timeout(self.cfg.nav_timeout_ms)
         return self
+
+    def _launch_context(self, base: dict):
+        """Lanza el navegador real elegido; si no esta, cae al Chromium interno."""
+        attempts = []
+        if self.cfg.browser_executable:
+            attempts.append(("ejecutable " + self.cfg.browser_executable,
+                             {**base, "executable_path": self.cfg.browser_executable}))
+        elif self.cfg.browser_channel:
+            attempts.append((f"canal {self.cfg.browser_channel}",
+                             {**base, "channel": self.cfg.browser_channel}))
+        attempts.append(("chromium interno", base))  # fallback
+
+        last_err = None
+        for descr, kwargs in attempts:
+            try:
+                ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+                log.info("Navegador: %s", descr)
+                return ctx
+            except Exception as exc:
+                log.warning("No pude abrir %s: %s", descr, exc)
+                last_err = exc
+        raise RuntimeError(f"No pude abrir ningun navegador. Ultimo error: {last_err}")
 
     def __exit__(self, *exc) -> None:
         try:

@@ -37,6 +37,8 @@ class Config:
     search_url: str = DIAN_SEARCH_URL
     client_cert_path: str | None = None   # .pfx/.p12 del certificado DIAN (mTLS)
     client_cert_pass: str | None = None
+    browser_channel: str | None = "msedge"   # navegador real: menos deteccion anti-bot
+    browser_executable: str | None = None     # ruta a un navegador (ej. Brave); anula el canal
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -74,6 +76,8 @@ class Config:
             search_url=(os.getenv("DIAN_SEARCH_URL") or "").strip() or DIAN_SEARCH_URL,
             client_cert_path=(os.getenv("CLIENT_CERT_PATH") or "").strip() or None,
             client_cert_pass=(os.getenv("CLIENT_CERT_PASS") or "").strip() or None,
+            browser_channel=(os.getenv("BROWSER_CHANNEL", "msedge") or "").strip() or None,
+            browser_executable=(os.getenv("BROWSER_EXECUTABLE") or "").strip() or None,
         )
         cfg._validate()
         return cfg
